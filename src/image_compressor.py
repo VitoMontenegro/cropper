@@ -208,17 +208,18 @@ class ImageCompressor:
         """
 
         img = Image.open(input_path)
+        # exif_transpose возвращает новый объект без .format — читаем формат до поворота.
+        source_fmt = (img.format or _format_from_suffix(input_path) or "JPEG").upper()
         img = ImageOps.exif_transpose(img)
-        img_format = (img.format or "JPEG").upper()
 
         if self.settings.convert_to_jpeg:
             target_fmt = "JPEG"
         else:
-            target_fmt = img_format
+            target_fmt = source_fmt
 
-        # JPEG не поддерживает альфа‑канал, приводим к RGB при необходимости.
-        if target_fmt == "JPEG" and img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
+        # JPEG не поддерживает альфа‑канал — накладываем на белый фон.
+        if target_fmt == "JPEG":
+            img = _flatten_to_rgb(img)
 
         # Масштабируем слишком большие изображения до max_long_edge_px по большей стороне.
         max_edge = self._max_long_edge_px or getattr(
@@ -260,6 +261,43 @@ class ImageCompressor:
         img.save(buffer, format=fmt, **save_kwargs)
         data = buffer.getvalue()
         return data, len(data)
+
+
+def _format_from_suffix(path: Path) -> str | None:
+    ext = path.suffix.lower()
+    return {".jpg": "JPEG", ".jpeg": "JPEG", ".png": "PNG"}.get(ext)
+
+
+def _flatten_to_rgb(
+    img: Image.Image,
+    background: tuple[int, int, int] = (255, 255, 255),
+) -> Image.Image:
+    """
+    Преобразует изображение в RGB, корректно обрабатывая прозрачность.
+
+    Pillow при img.convert("RGB") подставляет чёрный фон и сохраняет RGB‑значения
+    прозрачных пикселей — отсюда «чёрный» или «негативный» фон у PNG.
+    """
+
+    if img.mode == "RGB":
+        return img
+
+    if img.mode == "L":
+        return img.convert("RGB")
+
+    if img.mode == "P":
+        if "transparency" in img.info:
+            img = img.convert("RGBA")
+        else:
+            return img.convert("RGB")
+
+    if img.mode in ("RGBA", "LA"):
+        rgba = img.convert("RGBA") if img.mode == "LA" else img
+        background_img = Image.new("RGB", rgba.size, background)
+        background_img.paste(rgba, mask=rgba.split()[-1])
+        return background_img
+
+    return img.convert("RGB")
 
 
 def _safe_getsize(path: Path) -> int:
